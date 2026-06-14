@@ -29,7 +29,6 @@ launchd/
 scripts/vpn_watchdog.sh
 
 # Local Cody voice assistant prototype; keep it off the publish repo.
-/README.md
 /TEST_PLAN.md
 /config.example.toml
 /models/

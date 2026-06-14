@@ -1,15 +1,76 @@
 # Feishu Codex Bridge
 
-Standalone bridge for:
+Use Feishu or Lark as a remote control channel for the local Codex app.
+
+The bridge receives Feishu messages, forwards them into Codex, keeps each Feishu chat in a persistent Codex thread, and sends the final Codex answer back to Feishu. It is designed for people who want to operate Codex from mobile or team chat while still using the real local Codex environment on a Mac.
 
 ```text
-Feishu/Lark message → local bridge → Codex → Feishu reply
+Feishu / Lark chat
+        ↓
+feishu-codex-bridge
+        ↓
+local Codex app-server / codex exec
+        ↓
+Feishu reply + optional files/images
 ```
 
-The project has two Codex modes:
+## Why This Exists
 
-- `codex exec` text mode, working now for smoke tests.
-- Codex app-server mode, working as the real Codex app/thread bridge.
+Codex is powerful when it can see and act in your local development environment. Feishu is convenient when you are away from your desk. This project connects the two:
+
+- Talk to Codex from Feishu.
+- Keep the conversation visible in the Codex app.
+- Forward local approval prompts back to Feishu.
+- Send screenshots, images, and files back through Feishu.
+- Preserve a safe local-first architecture without exposing a public Codex API.
+
+## Current Status
+
+This is an MVP, but it is already useful for personal remote control.
+
+| Capability | Status |
+|---|---|
+| Feishu/Lark websocket messages | Working |
+| Persistent Codex app threads | Working |
+| Text messages | Working |
+| Image and file download from Feishu | Working |
+| Image/file upload back to Feishu | Working |
+| Feishu approval forwarding | Working |
+| HTTP webhook mode | Available |
+| Multi-user production hardening | Not complete |
+
+## Features
+
+- **One Feishu chat, one Codex thread**: each Feishu `chat_id` maps to a persistent Codex thread.
+- **Codex app-server mode**: uses the local Codex app-server so conversations appear in the Codex UI.
+- **Safe approval loop**: Codex approval requests can be sent to Feishu; reply `approve` or `deny`.
+- **Media support**: downloads Feishu images/files locally and uploads local image/file paths from Codex responses back to Feishu.
+- **Fallback delivery**: if normal chat sending fails, the bridge falls back to Feishu message replies.
+- **Dry-run mode**: process messages without posting back to Feishu while testing.
+
+## Architecture
+
+```text
+src/feishu_codex_bridge/
+├── __main__.py        # CLI entrypoint: HTTP server or Feishu websocket mode
+├── app.py             # FastAPI webhook, health check, local simulation API
+├── approval.py        # Feishu approve/deny flow for Codex local approvals
+├── codex_client.py    # codex exec + Codex app-server JSON-RPC clients
+├── config.py          # environment-based settings
+├── feishu_client.py   # Feishu token, send, reply, upload, download helpers
+├── feishu_events.py   # Feishu/Lark event parsing
+├── feishu_ws.py       # Feishu long-connection websocket bridge
+├── security.py        # Feishu token/signature verification
+└── thread_store.py    # Feishu chat_id → Codex thread_id mapping
+```
+
+## Requirements
+
+- macOS with the local Codex app installed.
+- Python 3.11.
+- [`uv`](https://github.com/astral-sh/uv).
+- A Feishu or Lark custom app with bot messaging enabled.
+- Feishu app credentials, either in `.env` or reused from Hermes.
 
 ## Quick Start
 
@@ -17,18 +78,21 @@ The project has two Codex modes:
 cd feishu-codex-bridge
 cp .env.example .env
 UV_CACHE_DIR=.uv-cache uv sync --extra feishu --extra test
+```
+
+Start in safe local HTTP mode:
+
+```bash
 UV_CACHE_DIR=.uv-cache uv run feishu-codex-bridge
 ```
 
-Open:
+Check health:
 
 ```bash
 curl http://127.0.0.1:8788/health
 ```
 
-## Local Simulation
-
-This tests Feishu → bridge → Codex without using Feishu:
+Run a local simulation without Feishu:
 
 ```bash
 curl -X POST http://127.0.0.1:8788/simulate \
@@ -36,61 +100,9 @@ curl -X POST http://127.0.0.1:8788/simulate \
   -d '{"text":"Reply with exactly: Feishu Codex bridge OK"}'
 ```
 
-## Codex App Thread Mode
+## Recommended Mode: Feishu Websocket + Codex App Threads
 
-To make Feishu conversations appear in the Codex interface:
-
-```bash
-BRIDGE_CODEX_USE_APP_SERVER=true UV_CACHE_DIR=.uv-cache uv run feishu-codex-bridge
-```
-
-Then simulate:
-
-```bash
-curl -X POST http://127.0.0.1:8788/simulate \
-  -H 'content-type: application/json' \
-  -d '{"conversation_id":"feishu-chat-1","text":"Reply with exactly: Codex app thread OK"}'
-```
-
-Behavior:
-
-- The bridge creates a non-ephemeral Codex thread.
-- The thread is named `Feishu: <conversation_id>`.
-- The mapping is stored in `.codex-thread-map.json`.
-- Later messages with the same `conversation_id` resume the same Codex thread.
-- The Codex UI can show that thread/history.
-
-## Feishu Setup
-
-1. Create or reuse a Feishu/Lark custom app.
-2. Enable bot capability.
-3. Enable message event subscription.
-4. Point Feishu event callback to:
-
-   `https://YOUR_PUBLIC_URL/feishu/events`
-
-5. Set `.env`:
-
-   - `BRIDGE_FEISHU_APP_ID`
-   - `BRIDGE_FEISHU_APP_SECRET`
-   - `BRIDGE_FEISHU_VERIFICATION_TOKEN`
-   - `BRIDGE_FEISHU_ENCRYPT_KEY` if Feishu encryption is enabled
-   - `BRIDGE_DRY_RUN_REPLIES=false` after local tests pass
-
-For local development, expose the bridge with Cloudflare Tunnel or ngrok.
-
-## Hermes Feishu Websocket Mode
-
-If Hermes is already configured for Feishu long-connection mode, this bridge can reuse the same app credentials from `~/.hermes/.env`.
-
-Install websocket support:
-
-```bash
-cd feishu-codex-bridge
-UV_CACHE_DIR=.uv-cache uv sync --extra feishu --extra test
-```
-
-Run the standalone Feishu websocket bridge:
+For real remote control, run Feishu long-connection mode with Codex app-server enabled:
 
 ```bash
 BRIDGE_CODEX_USE_APP_SERVER=true \
@@ -98,30 +110,175 @@ BRIDGE_DRY_RUN_REPLIES=false \
 UV_CACHE_DIR=.uv-cache uv run feishu-codex-bridge feishu-ws -v
 ```
 
-Important:
+This mode:
 
-- Stop the Hermes gateway first if it is using `FEISHU_CONNECTION_MODE=websocket`; only one client should hold the Feishu websocket connection for the same app.
-- `BRIDGE_FEISHU_DELIVERY_MODE=send` posts normal visible chat messages. Use `reply` only if you want Feishu threaded replies under each user message.
-- `BRIDGE_FEISHU_APPROVAL_ENABLED=true` forwards Codex approval prompts to Feishu. Reply `approve` or `deny`.
-- The default Codex model is `gpt-5.5` with `BRIDGE_CODEX_REASONING_EFFORT=medium`; image fallback inherits those settings unless `BRIDGE_IMAGE_CODEX_MODEL` or `BRIDGE_IMAGE_CODEX_REASONING_EFFORT` is set.
-- Feishu `chat_id` to Codex `thread_id` mapping is stored in the bridge project at `.codex-thread-map.json`, so restarting from another shell directory still resumes the same Codex conversation.
-- `BRIDGE_CODEX_STREAM_LIMIT_BYTES` defaults to 16MB to handle large app-server events from tool use, screenshots, and long context without crashing the second turn.
-- Keep `BRIDGE_DRY_RUN_REPLIES=true` for the first live connection test if you only want logs and Codex processing without Feishu replies.
-- The bridge maps each Feishu `chat_id` to a persistent Codex thread, so follow-up messages from the same chat continue in the same Codex UI conversation.
-- Hermes env fallback reads `FEISHU_APP_ID`, `FEISHU_APP_SECRET`, `FEISHU_VERIFICATION_TOKEN`, `FEISHU_ENCRYPT_KEY`, and `FEISHU_DOMAIN`.
-- Text, image, and file messages are supported. Images/files are downloaded into `feishu-media/` and passed to Codex as local file paths.
-- Image messages are saved as real `.jpg`/`.png` files. By default, image analysis uses `codex exec --image` because some app-server model sessions reject image inputs.
+- Connects directly to Feishu/Lark websocket events.
+- Creates or resumes one persistent Codex thread per Feishu chat.
+- Shows Feishu conversations in the Codex app.
+- Sends Codex final answers back to Feishu.
 
-## Codex App Features and Safety
+## Feishu/Lark Setup
 
-App-server mode uses JSON-RPC methods including `thread/start`, `thread/resume`, `thread/name/set`, and `turn/start`.
+1. Create or reuse a Feishu/Lark custom app.
+2. Enable bot capability.
+3. Enable message receive events.
+4. Choose one connection method:
+   - **Websocket / long connection**: recommended for local personal use.
+   - **HTTP webhook**: useful when exposing the bridge through Cloudflare Tunnel or ngrok.
+5. Add credentials to `.env`, or set environment variables:
 
-Codex loads its configured tools/plugins for the thread, including local MCP servers where available. The bridge intentionally **does not auto-approve dangerous local actions** from Feishu.
+```bash
+BRIDGE_FEISHU_APP_ID=
+BRIDGE_FEISHU_APP_SECRET=
+BRIDGE_FEISHU_VERIFICATION_TOKEN=
+BRIDGE_FEISHU_ENCRYPT_KEY=
+BRIDGE_FEISHU_DOMAIN=feishu
+```
 
-When Feishu approval forwarding is enabled, the bridge sends a one-time approval code into the same Feishu chat and waits for `approve <code>` or `deny <code>`. This makes Feishu the remote approval channel without granting blanket Computer Use access.
+Use `BRIDGE_FEISHU_DOMAIN=lark` for Lark global apps.
 
-## Safety Defaults
+## Configuration
 
-- `BRIDGE_DRY_RUN_REPLIES=true` prevents accidental Feishu posting.
-- `codex exec` runs with `--sandbox read-only`.
-- App-server mode creates persistent Codex threads, but does not auto-approve command/file/computer-use actions.
+All settings use the `BRIDGE_` environment prefix.
+
+| Setting | Default | Purpose |
+|---|---:|---|
+| `BRIDGE_DRY_RUN_REPLIES` | `true` | Process locally without sending Feishu replies. |
+| `BRIDGE_FEISHU_DELIVERY_MODE` | `send` | `send` posts normal chat messages; `reply` replies under user messages. |
+| `BRIDGE_FEISHU_APPROVAL_ENABLED` | `true` | Forward Codex approval prompts to Feishu. |
+| `BRIDGE_FEISHU_APPROVAL_TIMEOUT_SECONDS` | `180` | Approval wait timeout. |
+| `BRIDGE_CODEX_USE_APP_SERVER` | `false` | Use real Codex app-server thread mode. |
+| `BRIDGE_CODEX_MODEL` | `gpt-5.5` | Model passed to Codex. |
+| `BRIDGE_CODEX_REASONING_EFFORT` | `medium` | Reasoning effort passed to Codex. |
+| `BRIDGE_CODEX_CWD` | `.` | Working directory for Codex tasks. |
+| `BRIDGE_CODEX_THREAD_MAP_PATH` | `.codex-thread-map.json` | Persistent Feishu chat → Codex thread map. |
+| `BRIDGE_MEDIA_DIR` | `feishu-media` | Local folder for downloaded Feishu media. |
+| `BRIDGE_MAX_MEDIA_BYTES` | `26214400` | Maximum media download size. |
+
+See `.env.example` for the full list.
+
+## Remote Approval Flow
+
+When Codex needs local approval, the bridge sends a Feishu message like:
+
+```text
+Codex approval required.
+
+Type: command
+Request: open -a "Microsoft Word"
+
+Reply `approve` to allow once, or `deny` to reject.
+```
+
+Reply with:
+
+```text
+approve
+```
+
+or:
+
+```text
+deny
+```
+
+Approvals are one-time decisions for the current pending request. The bridge does not grant blanket local control.
+
+## Images and Files
+
+Incoming Feishu images/files are downloaded to `feishu-media/` and passed to Codex as local paths.
+
+Outgoing local paths in Codex responses are detected and uploaded back to Feishu when possible. For example:
+
+```markdown
+![screenshot](/absolute/path/to/screenshot.png)
+```
+
+The bridge strips the local path from the visible text and sends the image/file through Feishu.
+
+## Safety Model
+
+This bridge is intentionally local-first.
+
+- Secrets are loaded from environment variables or local `.env` files.
+- `.env`, logs, media, thread maps, and local caches are ignored by Git.
+- `codex exec` uses `--sandbox read-only` by default.
+- App-server mode uses Codex approval policies rather than auto-approving local actions.
+- Feishu approvals are explicit `approve` / `deny` responses.
+- macOS privacy prompts still require local OS-level approval.
+
+If you make this public-facing or multi-user, add authentication, authorization, audit logs, and stricter approval policies before using it for sensitive machines.
+
+## Development
+
+Install dependencies:
+
+```bash
+UV_CACHE_DIR=.uv-cache uv sync --extra feishu --extra test
+```
+
+Run tests:
+
+```bash
+UV_CACHE_DIR=.uv-cache uv run pytest
+UV_CACHE_DIR=.uv-cache uv run python -m compileall -q src tests
+```
+
+Run HTTP server:
+
+```bash
+UV_CACHE_DIR=.uv-cache uv run feishu-codex-bridge
+```
+
+Run Feishu websocket bridge:
+
+```bash
+BRIDGE_CODEX_USE_APP_SERVER=true \
+BRIDGE_DRY_RUN_REPLIES=false \
+UV_CACHE_DIR=.uv-cache uv run feishu-codex-bridge feishu-ws -v
+```
+
+## Troubleshooting
+
+### Feishu receives nothing
+
+- Confirm only one websocket client is connected for the same Feishu app.
+- If Hermes is using Feishu websocket mode, stop Hermes first.
+- Keep `BRIDGE_DRY_RUN_REPLIES=false` for real replies.
+
+### Replies appear as threaded replies instead of normal messages
+
+Set:
+
+```bash
+BRIDGE_FEISHU_DELIVERY_MODE=send
+```
+
+If Feishu rejects `chat_id` sending, the bridge falls back to message replies automatically.
+
+### Second message hangs or crashes
+
+Large Codex app-server events can exceed small stream limits. The default is already raised:
+
+```bash
+BRIDGE_CODEX_STREAM_LIMIT_BYTES=16777216
+```
+
+### Images do not upload back to Feishu
+
+- Make sure Codex returns an absolute local file path.
+- Make sure the file exists and is below `BRIDGE_MAX_MEDIA_BYTES`.
+- Check that the Feishu app has image/file upload permissions.
+
+## Roadmap
+
+- Multi-account and multi-tenant authorization.
+- Better audit trail for approvals.
+- Rich Feishu cards for approval prompts.
+- Admin UI for conversation/thread mappings.
+- Deployment templates for launchd/systemd.
+- Optional queueing for long-running Codex tasks.
+
+## License
+
+No license has been selected yet. Add one before public distribution.
