@@ -213,7 +213,7 @@ async def test_stream_updates_are_not_forwarded_by_default() -> None:
 
     await bridge._handle_message_event(data)
 
-    assert codex.loaded_conversations == ["oc_1"]
+    assert codex.loaded_conversations == []
     assert feishu.texts == [("om_1", "oc_1", "done")]
 
 

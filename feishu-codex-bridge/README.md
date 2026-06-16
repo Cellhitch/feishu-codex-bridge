@@ -45,7 +45,7 @@ This is an MVP, but it is already useful for personal remote control.
 
 - **One Feishu chat, one Codex thread**: each Feishu `chat_id` maps to a persistent Codex thread, unless `BRIDGE_CODEX_FIXED_THREAD_ID` pins all chats to one thread.
 - **Codex app-server mode**: uses the local Codex app-server so conversations appear in the Codex UI.
-- **Codex app-server event stream**: can load existing thread history, attach recent Feishu history to the next visible Codex turn, and relay status, plan, tool, and reasoning updates.
+- **Codex app-server event stream**: can optionally replay existing thread history, attach recent Feishu history to the next visible Codex turn, and relay status, plan, tool, and reasoning updates.
 - **Safe approval loop**: Codex approval requests can be sent to Feishu; reply `approve` or `deny`.
 - **Media support**: downloads Feishu images/files locally and uploads local image/file paths from Codex responses back to Feishu.
 - **Fallback delivery**: if normal chat sending fails, the bridge falls back to Feishu message replies.
@@ -152,7 +152,7 @@ This mode:
 - Creates or resumes one persistent Codex thread per Feishu chat.
 - Shows Feishu conversations in the Codex app.
 - Sends Codex final answers back to Feishu.
-- Loads the existing Codex thread before handling the first message after startup.
+- Reuses the existing Codex thread without replaying history unless history forwarding is enabled.
 
 Recommended `.env` values for this mode:
 
@@ -220,7 +220,7 @@ All settings use the `BRIDGE_` environment prefix.
 | `BRIDGE_CODEX_CWD` | `.` | Working directory for Codex tasks. |
 | `BRIDGE_CODEX_THREAD_MAP_PATH` | `.codex-thread-map.json` | Persistent Feishu chat → Codex thread map. |
 | `BRIDGE_CODEX_FIXED_THREAD_ID` | empty | Optional hard-coded Codex thread ID. When set, all Feishu chats use this thread instead of the map. |
-| `BRIDGE_CODEX_LOAD_HISTORY_ON_START` | `true` | Read existing Codex thread history once per chat after startup. |
+| `BRIDGE_CODEX_LOAD_HISTORY_ON_START` | `true` | Allow Codex thread history replay once per chat after startup. History is read only when `BRIDGE_FEISHU_SHOW_HISTORY=true`. |
 | `BRIDGE_MEDIA_DIR` | `feishu-media` | Local folder for downloaded Feishu media. |
 | `BRIDGE_MAX_MEDIA_BYTES` | `26214400` | Maximum media download size. |
 

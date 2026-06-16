@@ -116,7 +116,7 @@ class FeishuWebsocketBridge:
                 chat_id=message.chat_id,
                 open_id=recipient_open_id,
             )
-            if self.settings.codex_load_history_on_start:
+            if self._should_replay_codex_history():
                 history = await self.codex.load_conversation(conversation_id)
                 if history:
                     logger.info("Loaded %s Codex history item(s) for %s", len(history), conversation_id)
@@ -205,6 +205,13 @@ class FeishuWebsocketBridge:
         except Exception:
             logger.warning("Failed to attach Feishu history to Codex prompt for %s", conversation_id, exc_info=True)
             return ""
+
+    def _should_replay_codex_history(self) -> bool:
+        return (
+            self.settings.codex_load_history_on_start
+            and self.settings.feishu_stream_updates_enabled
+            and self.settings.feishu_show_history
+        )
 
     async def _send_progress_after_delay(self, message_id: str, chat_id: str, open_id: str) -> None:
         delay = self.settings.feishu_progress_seconds
