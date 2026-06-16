@@ -77,6 +77,13 @@ class FakeFeishu(FeishuClient):
         return self.history_messages
 
 
+class StreamFailingFeishu(FakeFeishu):
+    async def deliver_text(self, *, message_id: str, chat_id: str, text: str) -> None:
+        if text.startswith("Action:\n"):
+            raise RuntimeError("transient Feishu send failure")
+        await super().deliver_text(message_id=message_id, chat_id=chat_id, text=text)
+
+
 @pytest.mark.anyio
 async def test_websocket_message_errors_are_reported_to_feishu() -> None:
     feishu = FakeFeishu()
@@ -244,6 +251,39 @@ async def test_opt_in_stream_updates_are_forwarded_to_feishu() -> None:
         ("om_1", "oc_1", "Update:\nI found the relevant path."),
         ("om_1", "oc_1", "done"),
     ]
+
+
+@pytest.mark.anyio
+async def test_failed_stream_update_does_not_fail_final_reply() -> None:
+    feishu = StreamFailingFeishu()
+    bridge = FeishuWebsocketBridge(
+        Settings(
+            _env_file=None,
+            use_hermes_feishu_env=False,
+            feishu_stream_updates_enabled=True,
+            feishu_show_reasoning=True,
+            feishu_stream_flush_seconds=0,
+        ),
+        StreamingCodex(),
+        feishu,
+    )
+    data = SimpleNamespace(
+        header=SimpleNamespace(event_id="evt"),
+        event=SimpleNamespace(
+            sender=SimpleNamespace(sender_id=SimpleNamespace(open_id="ou_1")),
+            message=SimpleNamespace(
+                message_id="om_1",
+                chat_id="oc_1",
+                message_type=SimpleNamespace(value="text"),
+                content='{"text":"hello"}',
+            ),
+        ),
+    )
+
+    await bridge._handle_message_event(data)
+
+    assert ("om_1", "oc_1", "done") in feishu.texts
+    assert all(not text.startswith("Action:\n") for _, _, text in feishu.texts)
 
 
 @pytest.mark.anyio

@@ -353,11 +353,14 @@ class _FeishuStreamRelay:
         limit = max(100, self.settings.feishu_stream_max_chars)
         if len(visible) > limit:
             visible = f"{visible[: limit - 20].rstrip()}\n...[truncated]"
-        await self.feishu.deliver_text(
-            message_id=self.message_id,
-            chat_id=self.chat_id,
-            text=f"{title}:\n{visible}",
-        )
+        try:
+            await self.feishu.deliver_text(
+                message_id=self.message_id,
+                chat_id=self.chat_id,
+                text=f"{title}:\n{visible}",
+            )
+        except Exception:
+            logger.warning("Failed to deliver Feishu stream update for %s", self.message_id, exc_info=True)
 
 
 def _format_feishu_history_for_codex(history: list[FeishuHistoryMessage], *, max_chars: int) -> str:
