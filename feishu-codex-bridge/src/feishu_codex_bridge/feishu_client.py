@@ -4,6 +4,7 @@ import json
 import mimetypes
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -16,6 +17,14 @@ from .config import Settings
 MARKDOWN_LOCAL_PATH_PATTERN = re.compile(r"!?\[[^\]]*]\((/[^)\n\r]+)\)")
 BACKTICK_LOCAL_PATH_PATTERN = re.compile(r"`(/[^`\n\r]+)`")
 PLAIN_LOCAL_PATH_PATTERN = re.compile(r"(?<![\w`])(/[^\s)\n\r\t]+)")
+
+
+@dataclass(frozen=True)
+class FeishuHistoryMessage:
+    message_id: str
+    create_time: int
+    sender: str
+    text: str
 
 
 class FeishuClient:
@@ -52,6 +61,43 @@ class FeishuClient:
     async def send_file_to_chat(self, chat_id: str, file_path: Path) -> None:
         file_key = await self.upload_file(file_path)
         await self._send_chat_content(chat_id=chat_id, msg_type="file", content={"file_key": file_key})
+
+    async def list_recent_text_messages(
+        self,
+        *,
+        chat_id: str,
+        before_message_id: str = "",
+        limit: int = 20,
+        lookback_seconds: int = 24 * 60 * 60,
+    ) -> list[FeishuHistoryMessage]:
+        if self.settings.dry_run_replies or not chat_id:
+            return []
+        page_size = min(max(limit + 1, 1), 50)
+        now = int(time.time())
+        start_time = max(0, now - max(1, int(lookback_seconds)))
+        token = await self._tenant_token()
+        url = f"{self.settings.feishu_domain}/open-apis/im/v1/messages"
+        params = {
+            "container_id_type": "chat",
+            "container_id": chat_id,
+            "start_time": str(start_time),
+            "end_time": str(now),
+            "sort_type": "ByCreateTimeDesc",
+            "page_size": page_size,
+        }
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(url, headers={"Authorization": f"Bearer {token}"}, params=params)
+        data = _feishu_json_response(response, "Feishu message history")
+        items = (data.get("data") or {}).get("items") or []
+        messages: list[FeishuHistoryMessage] = []
+        for item in items:
+            parsed = _history_message_from_api_item(item, before_message_id=before_message_id)
+            if parsed is not None:
+                messages.append(parsed)
+            if len(messages) >= limit:
+                break
+        messages.sort(key=lambda message: message.create_time)
+        return messages
 
     async def upload_image(self, image_path: Path) -> str:
         token = await self._tenant_token()
@@ -245,6 +291,70 @@ class FeishuClient:
 def _safe_filename(value: str) -> str:
     safe = "".join(char if char.isalnum() or char in "._- " else "_" for char in value).strip()
     return safe[:160].strip(". ") or ""
+
+
+def _history_message_from_api_item(
+    item: dict[str, Any],
+    *,
+    before_message_id: str = "",
+) -> FeishuHistoryMessage | None:
+    if item.get("deleted"):
+        return None
+    message_id = str(item.get("message_id") or "")
+    if before_message_id and message_id == before_message_id:
+        return None
+    msg_type = str(item.get("msg_type") or "")
+    body = item.get("body") or {}
+    text = _history_content_text(msg_type, str(body.get("content") or "")).strip()
+    if not text:
+        return None
+    sender = item.get("sender") or {}
+    sender_name = str(sender.get("sender_name") or sender.get("sender_type") or sender.get("id") or "unknown")
+    return FeishuHistoryMessage(
+        message_id=message_id,
+        create_time=int(item.get("create_time") or 0),
+        sender=sender_name,
+        text=text,
+    )
+
+
+def _history_content_text(msg_type: str, raw_content: str) -> str:
+    if not raw_content:
+        return ""
+    try:
+        content = json.loads(raw_content)
+    except ValueError:
+        content = {}
+    if msg_type == "text":
+        return str(content.get("text") or "")
+    if msg_type == "post":
+        return _extract_nested_text(content)
+    if msg_type == "file":
+        return f"[file: {content.get('file_name') or content.get('name') or 'unknown'}]"
+    if msg_type == "image":
+        return "[image]"
+    if msg_type:
+        return f"[{msg_type} message]"
+    return ""
+
+
+def _extract_nested_text(value: Any) -> str:
+    parts: list[str] = []
+
+    def visit(node: Any) -> None:
+        if isinstance(node, dict):
+            for key in ("text", "un_escape"):
+                text = node.get(key)
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+            for child in node.values():
+                visit(child)
+        elif isinstance(node, list):
+            for child in node:
+                visit(child)
+
+    visit(value)
+    return " ".join(parts)
 
 
 def _message_payload(msg_type: str, content: dict[str, Any]) -> dict[str, str]:

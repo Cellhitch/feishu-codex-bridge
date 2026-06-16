@@ -11,6 +11,7 @@ from feishu_codex_bridge.feishu_client import (
     _extension_from_bytes,
     _extension_from_content_type,
     _feishu_json_response,
+    _history_message_from_api_item,
     _strip_local_path_markup,
     _safe_filename,
 )
@@ -62,6 +63,24 @@ def test_extracts_markdown_local_paths_with_spaces(tmp_path) -> None:
 
     assert paths == [image.resolve()]
     assert _strip_local_path_markup(text, paths) == "Here it is:"
+
+
+def test_history_message_from_api_item_parses_text_and_skips_current() -> None:
+    item = {
+        "message_id": "om_old",
+        "create_time": 123,
+        "msg_type": "text",
+        "sender": {"sender_name": "User"},
+        "body": {"content": '{"text":"hello from Feishu"}'},
+    }
+
+    parsed = _history_message_from_api_item(item, before_message_id="om_current")
+
+    assert parsed is not None
+    assert parsed.message_id == "om_old"
+    assert parsed.sender == "User"
+    assert parsed.text == "hello from Feishu"
+    assert _history_message_from_api_item(item, before_message_id="om_old") is None
 
 
 @pytest.mark.anyio

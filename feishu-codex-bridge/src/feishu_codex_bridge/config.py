@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,6 +33,18 @@ class Settings(BaseSettings):
     feishu_delivery_mode: str = "send"
     feishu_approval_enabled: bool = True
     feishu_approval_timeout_seconds: float = 180.0
+    feishu_progress_seconds: float = 0.0
+    feishu_progress_text: str = "Working..."
+    feishu_stream_updates_enabled: bool = False
+    feishu_stream_flush_seconds: float = 2.0
+    feishu_stream_max_chars: int = 3500
+    feishu_stream_assistant_deltas: bool = False
+    feishu_show_reasoning: bool = False
+    feishu_show_history: bool = False
+    feishu_seed_history_to_codex: bool = False
+    feishu_history_max_messages: int = 20
+    feishu_history_lookback_seconds: int = 24 * 60 * 60
+    feishu_history_max_chars: int = 8000
     use_hermes_feishu_env: bool = True
     hermes_env_path: Path = Path.home() / ".hermes/.env"
 
@@ -45,6 +57,8 @@ class Settings(BaseSettings):
     codex_timeout_seconds: float = 120.0
     codex_stream_limit_bytes: int = 16 * 1024 * 1024
     codex_thread_map_path: Path = Field(default_factory=_default_thread_map_path)
+    codex_fixed_thread_id: str = ""
+    codex_load_history_on_start: bool = True
     codex_approval_policy: str = "on-request"
     codex_sandbox: str = "read-only"
     codex_thread_name_prefix: str = "Feishu"
@@ -57,8 +71,16 @@ class Settings(BaseSettings):
     image_codex_model: str = ""
     image_codex_reasoning_effort: str = ""
 
+    @field_validator("codex_app_socket", mode="before")
+    @classmethod
+    def blank_socket_path_is_none(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @model_validator(mode="after")
     def load_hermes_feishu_defaults(self) -> "Settings":
+        self.hermes_env_path = self.hermes_env_path.expanduser()
         hermes_env = _read_env_file(self.hermes_env_path) if self.use_hermes_feishu_env else {}
 
         self.feishu_app_id = self.feishu_app_id or os.getenv("FEISHU_APP_ID", "") or hermes_env.get("FEISHU_APP_ID", "")

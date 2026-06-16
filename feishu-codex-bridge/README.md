@@ -36,32 +36,40 @@ This is an MVP, but it is already useful for personal remote control.
 | Image and file download from Feishu | Working |
 | Image/file upload back to Feishu | Working |
 | Feishu approval forwarding | Working |
+| Codex thread history loading | Working |
+| Live Codex status/tool/reasoning forwarding | Available, opt-in |
 | HTTP webhook mode | Available |
 | Multi-user production hardening | Not complete |
 
 ## Features
 
-- **One Feishu chat, one Codex thread**: each Feishu `chat_id` maps to a persistent Codex thread.
+- **One Feishu chat, one Codex thread**: each Feishu `chat_id` maps to a persistent Codex thread, unless `BRIDGE_CODEX_FIXED_THREAD_ID` pins all chats to one thread.
 - **Codex app-server mode**: uses the local Codex app-server so conversations appear in the Codex UI.
+- **Codex app-server event stream**: can load existing thread history, attach recent Feishu history to the next visible Codex turn, and relay status, plan, tool, and reasoning updates.
 - **Safe approval loop**: Codex approval requests can be sent to Feishu; reply `approve` or `deny`.
 - **Media support**: downloads Feishu images/files locally and uploads local image/file paths from Codex responses back to Feishu.
 - **Fallback delivery**: if normal chat sending fails, the bridge falls back to Feishu message replies.
 - **Dry-run mode**: process messages without posting back to Feishu while testing.
 
-## Architecture
+## Repository Structure
 
 ```text
-src/feishu_codex_bridge/
-├── __main__.py        # CLI entrypoint: HTTP server or Feishu websocket mode
-├── app.py             # FastAPI webhook, health check, local simulation API
-├── approval.py        # Feishu approve/deny flow for Codex local approvals
-├── codex_client.py    # codex exec + Codex app-server JSON-RPC clients
-├── config.py          # environment-based settings
-├── feishu_client.py   # Feishu token, send, reply, upload, download helpers
-├── feishu_events.py   # Feishu/Lark event parsing
-├── feishu_ws.py       # Feishu long-connection websocket bridge
-├── security.py        # Feishu token/signature verification
-└── thread_store.py    # Feishu chat_id → Codex thread_id mapping
+.
+├── pyproject.toml              # package metadata, CLI entry point, dependencies
+├── uv.lock                     # locked Python dependency graph
+├── .env.example                # safe configuration template
+├── src/feishu_codex_bridge/
+│   ├── __main__.py             # CLI entrypoint: HTTP server or websocket mode
+│   ├── app.py                  # FastAPI webhook, health check, local simulation API
+│   ├── approval.py             # Feishu approve/deny flow for Codex local approvals
+│   ├── codex_client.py         # codex exec + Codex app-server JSON-RPC clients
+│   ├── config.py               # environment-based settings
+│   ├── feishu_client.py        # Feishu token, send, reply, upload, download helpers
+│   ├── feishu_events.py        # Feishu/Lark event parsing
+│   ├── feishu_ws.py            # Feishu long-connection websocket bridge
+│   ├── security.py             # Feishu token/signature verification
+│   └── thread_store.py         # Feishu chat_id to Codex thread_id mapping
+└── tests/                      # unit tests for config, Feishu, Codex, and routing
 ```
 
 ## Requirements
@@ -70,17 +78,38 @@ src/feishu_codex_bridge/
 - Python 3.11.
 - [`uv`](https://github.com/astral-sh/uv).
 - A Feishu or Lark custom app with bot messaging enabled.
-- Feishu app credentials, either in `.env` or reused from Hermes.
+- Feishu app credentials in `.env`, shell environment variables, or a local Hermes env file.
 
-## Quick Start
+## Install
 
 ```bash
+git clone https://github.com/<owner>/feishu-codex-bridge.git
 cd feishu-codex-bridge
-cp .env.example .env
 UV_CACHE_DIR=.uv-cache uv sync --extra feishu --extra test
+cp .env.example .env
 ```
 
-Start in safe local HTTP mode:
+Edit `.env` and set at least:
+
+```bash
+BRIDGE_USE_HERMES_FEISHU_ENV=false
+BRIDGE_FEISHU_APP_ID=
+BRIDGE_FEISHU_APP_SECRET=
+BRIDGE_FEISHU_VERIFICATION_TOKEN=
+BRIDGE_FEISHU_ENCRYPT_KEY=
+BRIDGE_FEISHU_DOMAIN=feishu
+```
+
+If you already keep Feishu credentials in a Hermes env file, leave:
+
+```bash
+BRIDGE_USE_HERMES_FEISHU_ENV=true
+BRIDGE_HERMES_ENV_PATH=~/.hermes/.env
+```
+
+## Smoke Test
+
+Start in safe local HTTP mode. This does not require Feishu to send real messages:
 
 ```bash
 UV_CACHE_DIR=.uv-cache uv run feishu-codex-bridge
@@ -100,7 +129,14 @@ curl -X POST http://127.0.0.1:8788/simulate \
   -d '{"text":"Reply with exactly: Feishu Codex bridge OK"}'
 ```
 
-## Recommended Mode: Feishu Websocket + Codex App Threads
+## Run Modes
+
+| Mode | Command | Use when |
+|---|---|---|
+| HTTP server | `uv run feishu-codex-bridge` | Testing locally, webhook deployments, or `/simulate` smoke tests. |
+| Feishu websocket | `uv run feishu-codex-bridge feishu-ws -v` | Recommended local remote-control mode. |
+
+## Recommended Run: Feishu Websocket + Codex App Threads
 
 For real remote control, run Feishu long-connection mode with Codex app-server enabled:
 
@@ -116,6 +152,27 @@ This mode:
 - Creates or resumes one persistent Codex thread per Feishu chat.
 - Shows Feishu conversations in the Codex app.
 - Sends Codex final answers back to Feishu.
+- Loads the existing Codex thread before handling the first message after startup.
+
+Recommended `.env` values for this mode:
+
+```bash
+BRIDGE_CODEX_USE_APP_SERVER=true
+BRIDGE_DRY_RUN_REPLIES=false
+BRIDGE_FEISHU_DELIVERY_MODE=reply
+BRIDGE_FEISHU_STREAM_UPDATES_ENABLED=true
+BRIDGE_FEISHU_SHOW_REASONING=true
+BRIDGE_FEISHU_SHOW_HISTORY=false
+BRIDGE_FEISHU_PROGRESS_SECONDS=0
+```
+
+To force all Feishu chats into one existing Codex thread, set:
+
+```bash
+BRIDGE_CODEX_FIXED_THREAD_ID=
+```
+
+Leave it blank to use the default one-Feishu-chat-to-one-Codex-thread map.
 
 ## Feishu/Lark Setup
 
@@ -147,15 +204,40 @@ All settings use the `BRIDGE_` environment prefix.
 | `BRIDGE_FEISHU_DELIVERY_MODE` | `send` | `send` posts normal chat messages; `reply` replies under user messages. |
 | `BRIDGE_FEISHU_APPROVAL_ENABLED` | `true` | Forward Codex approval prompts to Feishu. |
 | `BRIDGE_FEISHU_APPROVAL_TIMEOUT_SECONDS` | `180` | Approval wait timeout. |
+| `BRIDGE_FEISHU_PROGRESS_SECONDS` | `0` | Optional repeated plain progress reply interval. Keep `0` when live Codex stream updates are enabled. |
+| `BRIDGE_FEISHU_STREAM_UPDATES_ENABLED` | `false` | Forward live Codex status/tool/update events into Feishu. |
+| `BRIDGE_FEISHU_SHOW_REASONING` | `false` | Include Codex reasoning summaries in live Feishu updates. |
+| `BRIDGE_FEISHU_SHOW_HISTORY` | `false` | Replay loaded Codex thread history back into Feishu after startup. Usually keep this off. |
+| `BRIDGE_FEISHU_STREAM_ASSISTANT_DELTAS` | `false` | Forward assistant text deltas before the final answer. |
+| `BRIDGE_FEISHU_STREAM_FLUSH_SECONDS` | `2` | Minimum interval for buffered live stream updates. |
+| `BRIDGE_FEISHU_SEED_HISTORY_TO_CODEX` | `false` | Fetch recent Feishu chat history and attach it to the next visible Codex turn once per chat. |
+| `BRIDGE_FEISHU_HISTORY_MAX_MESSAGES` | `20` | Maximum recent Feishu messages to attach to Codex. |
+| `BRIDGE_FEISHU_HISTORY_LOOKBACK_SECONDS` | `86400` | Feishu history lookback window for Codex context. |
+| `BRIDGE_FEISHU_HISTORY_MAX_CHARS` | `8000` | Maximum characters copied from Feishu history into Codex. |
 | `BRIDGE_CODEX_USE_APP_SERVER` | `false` | Use real Codex app-server thread mode. |
 | `BRIDGE_CODEX_MODEL` | `gpt-5.5` | Model passed to Codex. |
 | `BRIDGE_CODEX_REASONING_EFFORT` | `medium` | Reasoning effort passed to Codex. |
 | `BRIDGE_CODEX_CWD` | `.` | Working directory for Codex tasks. |
 | `BRIDGE_CODEX_THREAD_MAP_PATH` | `.codex-thread-map.json` | Persistent Feishu chat → Codex thread map. |
+| `BRIDGE_CODEX_FIXED_THREAD_ID` | empty | Optional hard-coded Codex thread ID. When set, all Feishu chats use this thread instead of the map. |
+| `BRIDGE_CODEX_LOAD_HISTORY_ON_START` | `true` | Read existing Codex thread history once per chat after startup. |
 | `BRIDGE_MEDIA_DIR` | `feishu-media` | Local folder for downloaded Feishu media. |
 | `BRIDGE_MAX_MEDIA_BYTES` | `26214400` | Maximum media download size. |
 
 See `.env.example` for the full list.
+
+## Runtime Files
+
+The bridge creates local runtime state that should stay private and untracked:
+
+| Path | Purpose |
+|---|---|
+| `.env` | Local credentials and machine-specific settings. |
+| `.codex-thread-map.json` | Feishu chat to Codex thread mapping. |
+| `feishu-media/` | Downloaded Feishu images/files. |
+| `.uv-cache/`, `.venv/`, `.pytest_cache/` | Local Python/test caches. |
+
+These paths are ignored by `.gitignore`.
 
 ## Remote Approval Flow
 
@@ -183,6 +265,18 @@ deny
 ```
 
 Approvals are one-time decisions for the current pending request. The bridge does not grant blanket local control.
+
+## Live Codex Updates
+
+By default, Feishu receives the final Codex answer and approval prompts only. To mirror more of the live Codex timeline in Feishu, opt in explicitly:
+
+```bash
+BRIDGE_FEISHU_STREAM_UPDATES_ENABLED=true
+BRIDGE_FEISHU_SHOW_REASONING=true
+BRIDGE_FEISHU_SHOW_HISTORY=false
+```
+
+Reasoning and tool-progress messages may include details from local files, commands, or task context. Enable these only in Feishu chats where that extra visibility is acceptable.
 
 ## Images and Files
 

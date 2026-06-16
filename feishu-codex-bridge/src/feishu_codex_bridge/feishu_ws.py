@@ -3,13 +3,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import time
+from contextlib import suppress
 from concurrent.futures import Future
 from typing import Any
 
 from .approval import FeishuApprovalCoordinator
-from .codex_client import CodexClient
+from .codex_client import CodexClient, CodexStreamEvent, CodexStreamHandler
 from .config import Settings
-from .feishu_client import FeishuClient
+from .feishu_client import FeishuClient, FeishuHistoryMessage
 from .feishu_events import parse_lark_message_event
 
 logger = logging.getLogger(__name__)
@@ -29,6 +31,7 @@ class FeishuWebsocketBridge:
         self.approvals = approvals
         self._loop: asyncio.AbstractEventLoop | None = None
         self._conversation_locks: dict[str, asyncio.Lock] = {}
+        self._seeded_feishu_history: set[str] = set()
 
     async def run_forever(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -42,6 +45,8 @@ class FeishuWebsocketBridge:
         future_waiter = asyncio.wrap_future(future)
         stop_waiter = asyncio.create_task(stop_event.wait())
         logger.info("Feishu websocket bridge starting; waiting for messages")
+        await self.codex.prewarm()
+        logger.info("Codex client prewarmed")
         done, pending = await asyncio.wait(
             {future_waiter, stop_waiter},
             return_when=asyncio.FIRST_COMPLETED,
@@ -103,12 +108,37 @@ class FeishuWebsocketBridge:
             if self.approvals:
                 self.approvals.set_current_message(conversation_id, message.message_id)
             logger.info("Feishu %s message %s from %s", message.message_type, message.message_id, conversation_id)
+            stream_relay = _FeishuStreamRelay(
+                settings=self.settings,
+                feishu=self.feishu,
+                message_id=message.message_id,
+                chat_id=message.chat_id,
+            )
+            if self.settings.codex_load_history_on_start:
+                history = await self.codex.load_conversation(conversation_id)
+                if history:
+                    logger.info("Loaded %s Codex history item(s) for %s", len(history), conversation_id)
+                    await stream_relay.handle_history(history)
+            feishu_context = await self._feishu_history_context_for_codex(message, conversation_id)
+            progress_task = asyncio.create_task(self._send_progress_after_delay(message.message_id, message.chat_id))
             try:
-                response = await self._ask_codex_for_message(message, conversation_id)
+                started_at = time.perf_counter()
+                response = await self._ask_codex_for_message(
+                    message,
+                    conversation_id,
+                    stream_relay.handle,
+                    feishu_context=feishu_context,
+                )
+                elapsed = time.perf_counter() - started_at
+                progress_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await progress_task
+                await stream_relay.flush()
                 logger.info(
-                    "Codex response ready for %s; replying to %s; length=%s preview=%r",
+                    "Codex response ready for %s; replying to %s; seconds=%.2f length=%s preview=%r",
                     conversation_id,
                     message.message_id,
+                    elapsed,
                     len(response),
                     response[:160],
                 )
@@ -119,15 +149,67 @@ class FeishuWebsocketBridge:
                     message.message_id,
                 )
             except Exception as error:
+                progress_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await progress_task
+                await stream_relay.flush()
                 logger.exception("Failed to process Feishu message %s", message.message_id)
                 await self._send_error_to_feishu(message.message_id, message.chat_id, error)
 
-    async def _ask_codex_for_message(self, message: Any, conversation_id: str) -> str:
+    async def _ask_codex_for_message(
+        self,
+        message: Any,
+        conversation_id: str,
+        stream_handler: CodexStreamHandler | None = None,
+        *,
+        feishu_context: str = "",
+    ) -> str:
         prompt = await self._message_to_codex_prompt(message)
         if isinstance(prompt, tuple):
             text, image_path = prompt
+            if feishu_context:
+                text = _with_feishu_context(feishu_context, text)
             return await self.codex.ask_with_image(text, image_path, conversation_id)
-        return await self.codex.ask(prompt, conversation_id)
+        if feishu_context:
+            prompt = _with_feishu_context(feishu_context, prompt)
+        return await self.codex.ask_stream(prompt, conversation_id, stream_handler)
+
+    async def _feishu_history_context_for_codex(self, message: Any, conversation_id: str) -> str:
+        if not self.settings.feishu_seed_history_to_codex:
+            return ""
+        if conversation_id in self._seeded_feishu_history:
+            return ""
+        if not message.chat_id:
+            return ""
+        try:
+            history = await self.feishu.list_recent_text_messages(
+                chat_id=message.chat_id,
+                before_message_id=message.message_id,
+                limit=self.settings.feishu_history_max_messages,
+                lookback_seconds=self.settings.feishu_history_lookback_seconds,
+            )
+            text = _format_feishu_history_for_codex(history, max_chars=self.settings.feishu_history_max_chars)
+            self._seeded_feishu_history.add(conversation_id)
+            if text:
+                logger.info("Attached %s Feishu history message(s) to next Codex turn for %s", len(history), conversation_id)
+            return text
+        except Exception:
+            logger.warning("Failed to attach Feishu history to Codex prompt for %s", conversation_id, exc_info=True)
+            return ""
+
+    async def _send_progress_after_delay(self, message_id: str, chat_id: str) -> None:
+        delay = self.settings.feishu_progress_seconds
+        if delay <= 0:
+            return
+        text = self.settings.feishu_progress_text.strip()
+        if not text:
+            return
+        while True:
+            await asyncio.sleep(delay)
+            try:
+                await self.feishu.deliver_text(message_id=message_id, chat_id=chat_id, text=text)
+            except Exception:
+                logger.exception("Failed to deliver Feishu progress reply for %s", message_id)
 
     async def _message_to_codex_prompt(self, message: Any) -> str | tuple[str, Any]:
         if message.message_type == "text":
@@ -173,10 +255,11 @@ class FeishuWebsocketBridge:
 
     async def _send_error_to_feishu(self, message_id: str, chat_id: str, error: Exception) -> None:
         try:
+            detail = str(error).strip() or error.__class__.__name__
             await self.feishu.deliver_text(
                 message_id=message_id,
                 chat_id=chat_id,
-                text=f"Codex bridge error: {error}",
+                text=f"Codex bridge error: {detail}",
             )
         except Exception:
             logger.exception("Failed to deliver Feishu error reply for %s", message_id)
@@ -187,3 +270,117 @@ class FeishuWebsocketBridge:
             future.result()
         except Exception:
             logger.exception("Failed to process Feishu websocket event")
+
+
+class _FeishuStreamRelay:
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        feishu: FeishuClient,
+        message_id: str,
+        chat_id: str,
+    ) -> None:
+        self.settings = settings
+        self.feishu = feishu
+        self.message_id = message_id
+        self.chat_id = chat_id
+        self._reasoning_parts: list[str] = []
+        self._assistant_parts: list[str] = []
+        self._last_flush = 0.0
+
+    async def handle(self, event: CodexStreamEvent) -> None:
+        if not self.settings.feishu_stream_updates_enabled:
+            return
+        if event.kind == "history":
+            if self.settings.feishu_show_history:
+                await self._send("History", event.text)
+            return
+        if event.kind == "reasoning":
+            if not self.settings.feishu_show_reasoning:
+                return
+            self._reasoning_parts.append(event.text)
+            await self._flush_if_due()
+            return
+        if event.kind == "assistant_delta":
+            if not self.settings.feishu_stream_assistant_deltas:
+                return
+            self._assistant_parts.append(event.text)
+            await self._flush_if_due()
+            return
+        if event.kind == "assistant":
+            await self._send("Update", event.text)
+            return
+        if event.kind == "plan":
+            await self._send("Plan", event.text)
+            return
+        if event.kind == "tool":
+            await self._send("Action", event.text)
+            return
+        if event.kind == "status":
+            await self._send("Status", event.text)
+
+    async def handle_history(self, history: list[CodexStreamEvent]) -> None:
+        if not self.settings.feishu_stream_updates_enabled or not self.settings.feishu_show_history:
+            return
+        visible = [event.text.strip() for event in history if event.kind == "history" and event.text.strip()]
+        if visible:
+            await self._send("History", "\n\n".join(visible))
+
+    async def flush(self) -> None:
+        await self._flush_buffer("Thinking", self._reasoning_parts)
+        await self._flush_buffer("Update", self._assistant_parts)
+
+    async def _flush_if_due(self) -> None:
+        now = time.monotonic()
+        delay = self.settings.feishu_stream_flush_seconds
+        if delay > 0 and now - self._last_flush < delay:
+            return
+        await self.flush()
+        self._last_flush = now
+
+    async def _flush_buffer(self, title: str, parts: list[str]) -> None:
+        text = "".join(parts).strip()
+        if not text:
+            return
+        parts.clear()
+        await self._send(title, text)
+
+    async def _send(self, title: str, text: str) -> None:
+        visible = text.strip()
+        if not visible:
+            return
+        limit = max(100, self.settings.feishu_stream_max_chars)
+        if len(visible) > limit:
+            visible = f"{visible[: limit - 20].rstrip()}\n...[truncated]"
+        await self.feishu.deliver_text(
+            message_id=self.message_id,
+            chat_id=self.chat_id,
+            text=f"{title}:\n{visible}",
+        )
+
+
+def _format_feishu_history_for_codex(history: list[FeishuHistoryMessage], *, max_chars: int) -> str:
+    if not history:
+        return ""
+    lines = [
+        "Feishu chat history before the current request.",
+        "Use this as prior context. The next Feishu message is the one to answer.",
+        "",
+    ]
+    for message in history:
+        text = " ".join(message.text.split())
+        if text:
+            lines.append(f"{message.sender}: {text}")
+    visible = "\n".join(lines).strip()
+    limit = max(500, max_chars)
+    if len(visible) <= limit:
+        return visible
+    return "...[older Feishu history omitted]\n" + visible[-limit:].lstrip()
+
+
+def _with_feishu_context(context: str, prompt: str) -> str:
+    visible_context = context.strip()
+    if not visible_context:
+        return prompt
+    return f"{visible_context}\n\nCurrent Feishu message to answer:\n{prompt}"
