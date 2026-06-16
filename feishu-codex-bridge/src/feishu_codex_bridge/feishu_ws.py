@@ -108,11 +108,13 @@ class FeishuWebsocketBridge:
             if self.approvals:
                 self.approvals.set_current_message(conversation_id, message.message_id)
             logger.info("Feishu %s message %s from %s", message.message_type, message.message_id, conversation_id)
+            recipient_open_id = message.sender_id if _is_p2p_chat(message.chat_type) else ""
             stream_relay = _FeishuStreamRelay(
                 settings=self.settings,
                 feishu=self.feishu,
                 message_id=message.message_id,
                 chat_id=message.chat_id,
+                open_id=recipient_open_id,
             )
             if self.settings.codex_load_history_on_start:
                 history = await self.codex.load_conversation(conversation_id)
@@ -120,7 +122,9 @@ class FeishuWebsocketBridge:
                     logger.info("Loaded %s Codex history item(s) for %s", len(history), conversation_id)
                     await stream_relay.handle_history(history)
             feishu_context = await self._feishu_history_context_for_codex(message, conversation_id)
-            progress_task = asyncio.create_task(self._send_progress_after_delay(message.message_id, message.chat_id))
+            progress_task = asyncio.create_task(
+                self._send_progress_after_delay(message.message_id, message.chat_id, recipient_open_id)
+            )
             try:
                 started_at = time.perf_counter()
                 response = await self._ask_codex_for_message(
@@ -142,7 +146,12 @@ class FeishuWebsocketBridge:
                     len(response),
                     response[:160],
                 )
-                await self.feishu.deliver_response(message_id=message.message_id, chat_id=message.chat_id, text=response)
+                await self.feishu.deliver_response(
+                    message_id=message.message_id,
+                    chat_id=message.chat_id,
+                    open_id=recipient_open_id,
+                    text=response,
+                )
                 logger.info(
                     "Feishu %s sent for %s",
                     self.settings.feishu_delivery_mode,
@@ -154,7 +163,7 @@ class FeishuWebsocketBridge:
                     await progress_task
                 await stream_relay.flush()
                 logger.exception("Failed to process Feishu message %s", message.message_id)
-                await self._send_error_to_feishu(message.message_id, message.chat_id, error)
+                await self._send_error_to_feishu(message.message_id, message.chat_id, recipient_open_id, error)
 
     async def _ask_codex_for_message(
         self,
@@ -197,7 +206,7 @@ class FeishuWebsocketBridge:
             logger.warning("Failed to attach Feishu history to Codex prompt for %s", conversation_id, exc_info=True)
             return ""
 
-    async def _send_progress_after_delay(self, message_id: str, chat_id: str) -> None:
+    async def _send_progress_after_delay(self, message_id: str, chat_id: str, open_id: str) -> None:
         delay = self.settings.feishu_progress_seconds
         if delay <= 0:
             return
@@ -207,7 +216,7 @@ class FeishuWebsocketBridge:
         while True:
             await asyncio.sleep(delay)
             try:
-                await self.feishu.deliver_text(message_id=message_id, chat_id=chat_id, text=text)
+                await self.feishu.deliver_text(message_id=message_id, chat_id=chat_id, open_id=open_id, text=text)
             except Exception:
                 logger.exception("Failed to deliver Feishu progress reply for %s", message_id)
 
@@ -253,12 +262,13 @@ class FeishuWebsocketBridge:
     def _on_bot_p2p_chat_entered_event(data: Any) -> None:
         logger.debug("Ignoring Feishu bot-p2p-chat-entered event: %s", type(data).__name__)
 
-    async def _send_error_to_feishu(self, message_id: str, chat_id: str, error: Exception) -> None:
+    async def _send_error_to_feishu(self, message_id: str, chat_id: str, open_id: str, error: Exception) -> None:
         try:
             detail = str(error).strip() or error.__class__.__name__
             await self.feishu.deliver_text(
                 message_id=message_id,
                 chat_id=chat_id,
+                open_id=open_id,
                 text=f"Codex bridge error: {detail}",
             )
         except Exception:
@@ -280,11 +290,13 @@ class _FeishuStreamRelay:
         feishu: FeishuClient,
         message_id: str,
         chat_id: str,
+        open_id: str,
     ) -> None:
         self.settings = settings
         self.feishu = feishu
         self.message_id = message_id
         self.chat_id = chat_id
+        self.open_id = open_id
         self._reasoning_parts: list[str] = []
         self._assistant_parts: list[str] = []
         self._last_flush = 0.0
@@ -318,6 +330,8 @@ class _FeishuStreamRelay:
             await self._send("Action", event.text)
             return
         if event.kind == "status":
+            if event.text.strip() == "Codex started working.":
+                return
             await self._send("Status", event.text)
 
     async def handle_history(self, history: list[CodexStreamEvent]) -> None:
@@ -357,10 +371,15 @@ class _FeishuStreamRelay:
             await self.feishu.deliver_text(
                 message_id=self.message_id,
                 chat_id=self.chat_id,
+                open_id=self.open_id,
                 text=f"{title}:\n{visible}",
             )
         except Exception:
             logger.warning("Failed to deliver Feishu stream update for %s", self.message_id, exc_info=True)
+
+
+def _is_p2p_chat(chat_type: str) -> bool:
+    return "p2p" in chat_type.strip().lower()
 
 
 def _format_feishu_history_for_codex(history: list[FeishuHistoryMessage], *, max_chars: int) -> str:

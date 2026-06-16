@@ -638,7 +638,6 @@ class _CodexTurnEventMapper:
         if not _matches_thread(params, thread_id) or not _matches_turn(params, turn_id):
             return
         if method == "turn/started":
-            await self.emit(CodexStreamEvent("status", "Codex started working."))
             return
         if method == "item/agentMessage/delta":
             item_id = str(params.get("itemId") or "")

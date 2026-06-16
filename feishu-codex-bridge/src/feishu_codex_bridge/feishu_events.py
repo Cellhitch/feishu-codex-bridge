@@ -9,6 +9,7 @@ from typing import Any
 class FeishuMessage:
     event_id: str
     chat_id: str
+    chat_type: str
     message_id: str
     sender_id: str
     message_type: str
@@ -42,6 +43,7 @@ def parse_feishu_event(payload: dict[str, Any]) -> FeishuMessage | None:
     return FeishuMessage(
         event_id=str(header.get("event_id") or message.get("message_id") or ""),
         chat_id=str(message.get("chat_id") or ""),
+        chat_type=str(message.get("chat_type") or ""),
         message_id=str(message.get("message_id") or ""),
         sender_id=str(
             (sender.get("sender_id") or {}).get("open_id")
@@ -79,9 +81,12 @@ def parse_lark_message_event(data: Any) -> FeishuMessage | None:
         return None
 
     header = getattr(data, "header", None)
+    chat_type = getattr(message, "chat_type", "")
+    chat_type_value = getattr(chat_type, "value", chat_type)
     return FeishuMessage(
         event_id=str(getattr(header, "event_id", "") or getattr(message, "message_id", "") or ""),
         chat_id=str(getattr(message, "chat_id", "") or ""),
+        chat_type=str(chat_type_value or ""),
         message_id=str(getattr(message, "message_id", "") or ""),
         sender_id=str(
             getattr(sender_id, "open_id", None)

@@ -122,6 +122,53 @@ def test_feishu_json_response_raises_on_application_error() -> None:
 
 
 @pytest.mark.anyio
+async def test_deliver_text_prefers_open_id_for_send_mode() -> None:
+    class FakeFeishu(FeishuClient):
+        def __init__(self) -> None:
+            super().__init__(Settings(_env_file=None, use_hermes_feishu_env=False, dry_run_replies=False))
+            self.open_id_sends: list[tuple[str, str]] = []
+            self.chat_sends: list[tuple[str, str]] = []
+            self.replies: list[tuple[str, str]] = []
+
+        async def send_text_to_open_id(self, open_id: str, text: str) -> None:
+            self.open_id_sends.append((open_id, text))
+
+        async def send_text_to_chat(self, chat_id: str, text: str) -> None:
+            self.chat_sends.append((chat_id, text))
+
+        async def reply_to_message(self, message_id: str, text: str) -> None:
+            self.replies.append((message_id, text))
+
+    client = FakeFeishu()
+
+    await client.deliver_text(message_id="om_1", chat_id="oc_1", open_id="ou_1", text="normal")
+
+    assert client.open_id_sends == [("ou_1", "normal")]
+    assert client.chat_sends == []
+    assert client.replies == []
+
+
+@pytest.mark.anyio
+async def test_deliver_text_falls_back_from_open_id_to_chat_id() -> None:
+    class FakeFeishu(FeishuClient):
+        def __init__(self) -> None:
+            super().__init__(Settings(_env_file=None, use_hermes_feishu_env=False, dry_run_replies=False))
+            self.chat_sends: list[tuple[str, str]] = []
+
+        async def send_text_to_open_id(self, open_id: str, text: str) -> None:
+            raise RuntimeError("Feishu send message failed: code=230001 message=invalid receive_id")
+
+        async def send_text_to_chat(self, chat_id: str, text: str) -> None:
+            self.chat_sends.append((chat_id, text))
+
+    client = FakeFeishu()
+
+    await client.deliver_text(message_id="om_1", chat_id="oc_1", open_id="ou_bad", text="normal")
+
+    assert client.chat_sends == [("oc_1", "normal")]
+
+
+@pytest.mark.anyio
 async def test_deliver_text_falls_back_to_reply_on_invalid_receive_id() -> None:
     class FakeFeishu(FeishuClient):
         def __init__(self) -> None:

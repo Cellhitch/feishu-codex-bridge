@@ -72,7 +72,17 @@ def create_app(
             return {"ok": True, "ignored": True}
 
         response = await codex.ask(message.text, message.chat_id or message.sender_id)
-        await feishu.deliver_response(message_id=message.message_id, chat_id=message.chat_id, text=response)
+        recipient_open_id = message.sender_id if _is_p2p_chat(message.chat_type) else ""
+        await feishu.deliver_response(
+            message_id=message.message_id,
+            chat_id=message.chat_id,
+            open_id=recipient_open_id,
+            text=response,
+        )
         return {"ok": True, "message_id": message.message_id, "dry_run": settings.dry_run_replies}
 
     return app
+
+
+def _is_p2p_chat(chat_type: str) -> bool:
+    return "p2p" in chat_type.strip().lower()

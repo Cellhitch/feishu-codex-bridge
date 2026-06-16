@@ -17,6 +17,7 @@ def test_parse_text_message_event() -> None:
             "message": {
                 "message_id": "om_1",
                 "chat_id": "oc_1",
+                "chat_type": "p2p",
                 "message_type": "text",
                 "content": "{\"text\":\"  hello   codex  \"}",
             },
@@ -29,6 +30,7 @@ def test_parse_text_message_event() -> None:
     assert message.event_id == "evt-1"
     assert message.message_id == "om_1"
     assert message.chat_id == "oc_1"
+    assert message.chat_type == "p2p"
     assert message.sender_id == "ou_1"
     assert message.text == "hello codex"
 
@@ -85,6 +87,7 @@ def test_parse_lark_message_event() -> None:
             message=SimpleNamespace(
                 message_id="om_2",
                 chat_id="oc_2",
+                chat_type=SimpleNamespace(value="p2p"),
                 message_type=SimpleNamespace(value="text"),
                 content="{\"text\":\" hi from websocket \"}",
             ),
@@ -97,5 +100,6 @@ def test_parse_lark_message_event() -> None:
     assert message.event_id == "evt-2"
     assert message.message_id == "om_2"
     assert message.chat_id == "oc_2"
+    assert message.chat_type == "p2p"
     assert message.sender_id == "ou_2"
     assert message.text == "hi from websocket"

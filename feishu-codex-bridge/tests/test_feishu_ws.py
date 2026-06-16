@@ -59,11 +59,13 @@ class FakeFeishu(FeishuClient):
     def __init__(self) -> None:
         super().__init__(Settings(_env_file=None, use_hermes_feishu_env=False, dry_run_replies=False))
         self.texts: list[tuple[str, str, str]] = []
+        self.text_targets: list[tuple[str, str, str, str]] = []
         self.history_messages: list[FeishuHistoryMessage] = []
         self.history_requests: list[tuple[str, str, int, int]] = []
 
-    async def deliver_text(self, *, message_id: str, chat_id: str, text: str) -> None:
+    async def deliver_text(self, *, message_id: str, chat_id: str, text: str, open_id: str = "") -> None:
         self.texts.append((message_id, chat_id, text))
+        self.text_targets.append((message_id, chat_id, open_id, text))
 
     async def list_recent_text_messages(
         self,
@@ -78,10 +80,10 @@ class FakeFeishu(FeishuClient):
 
 
 class StreamFailingFeishu(FakeFeishu):
-    async def deliver_text(self, *, message_id: str, chat_id: str, text: str) -> None:
+    async def deliver_text(self, *, message_id: str, chat_id: str, text: str, open_id: str = "") -> None:
         if text.startswith("Action:\n"):
             raise RuntimeError("transient Feishu send failure")
-        await super().deliver_text(message_id=message_id, chat_id=chat_id, text=text)
+        await super().deliver_text(message_id=message_id, chat_id=chat_id, open_id=open_id, text=text)
 
 
 @pytest.mark.anyio
@@ -119,7 +121,7 @@ async def test_empty_error_messages_use_exception_name() -> None:
         feishu,
     )
 
-    await bridge._send_error_to_feishu("om_1", "oc_1", TimeoutError())
+    await bridge._send_error_to_feishu("om_1", "oc_1", "", TimeoutError())
 
     assert feishu.texts == [("om_1", "oc_1", "Codex bridge error: TimeoutError")]
 
@@ -245,11 +247,48 @@ async def test_opt_in_stream_updates_are_forwarded_to_feishu() -> None:
     await bridge._handle_message_event(data)
 
     assert feishu.texts == [
-        ("om_1", "oc_1", "Status:\nCodex started working."),
         ("om_1", "oc_1", "Thinking:\nChecking the repo."),
         ("om_1", "oc_1", "Action:\nRunning command: npm test"),
         ("om_1", "oc_1", "Update:\nI found the relevant path."),
         ("om_1", "oc_1", "done"),
+    ]
+
+
+@pytest.mark.anyio
+async def test_p2p_stream_updates_use_sender_open_id_for_normal_messages() -> None:
+    feishu = FakeFeishu()
+    bridge = FeishuWebsocketBridge(
+        Settings(
+            _env_file=None,
+            use_hermes_feishu_env=False,
+            feishu_stream_updates_enabled=True,
+            feishu_show_reasoning=True,
+            feishu_stream_flush_seconds=0,
+        ),
+        StreamingCodex(),
+        feishu,
+    )
+    data = SimpleNamespace(
+        header=SimpleNamespace(event_id="evt"),
+        event=SimpleNamespace(
+            sender=SimpleNamespace(sender_id=SimpleNamespace(open_id="ou_1")),
+            message=SimpleNamespace(
+                message_id="om_1",
+                chat_id="oc_1",
+                chat_type="p2p",
+                message_type=SimpleNamespace(value="text"),
+                content='{"text":"hello"}',
+            ),
+        ),
+    )
+
+    await bridge._handle_message_event(data)
+
+    assert feishu.text_targets == [
+        ("om_1", "oc_1", "ou_1", "Thinking:\nChecking the repo."),
+        ("om_1", "oc_1", "ou_1", "Action:\nRunning command: npm test"),
+        ("om_1", "oc_1", "ou_1", "Update:\nI found the relevant path."),
+        ("om_1", "oc_1", "ou_1", "done"),
     ]
 
 

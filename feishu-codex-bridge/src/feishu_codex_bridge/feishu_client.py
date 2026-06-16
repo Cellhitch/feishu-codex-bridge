@@ -33,6 +33,7 @@ class FeishuClient:
         self._tenant_access_token: str | None = None
         self._token_expires_at = 0.0
         self._reply_only_chat_ids: set[str] = set()
+        self._reply_only_open_ids: set[str] = set()
 
     async def reply_to_message(self, message_id: str, text: str) -> None:
         await self.reply_content_to_message(message_id, "text", {"text": f"{self.settings.reply_prefix}{text}"})
@@ -52,7 +53,26 @@ class FeishuClient:
             return
         token = await self._tenant_token()
         url = f"{self.settings.feishu_domain}/open-apis/im/v1/messages"
-        await self._send_message_to_chat(token=token, url=url, chat_id=chat_id, payload=self._text_reply_payload(text))
+        await self._send_message(
+            token=token,
+            url=url,
+            receive_id=chat_id,
+            receive_id_type="chat_id",
+            payload=self._text_reply_payload(text),
+        )
+
+    async def send_text_to_open_id(self, open_id: str, text: str) -> None:
+        if self.settings.dry_run_replies:
+            return
+        token = await self._tenant_token()
+        url = f"{self.settings.feishu_domain}/open-apis/im/v1/messages"
+        await self._send_message(
+            token=token,
+            url=url,
+            receive_id=open_id,
+            receive_id_type="open_id",
+            payload=self._text_reply_payload(text),
+        )
 
     async def send_image_to_chat(self, chat_id: str, image_path: Path) -> None:
         image_key = await self.upload_image(image_path)
@@ -141,58 +161,74 @@ class FeishuClient:
             return
         token = await self._tenant_token()
         url = f"{self.settings.feishu_domain}/open-apis/im/v1/messages"
-        payload = {
-            "receive_id": chat_id,
-            **_message_payload(msg_type, content),
-        }
-        await self._send_message_to_chat(token=token, url=url, chat_id=chat_id, payload=payload)
+        payload = _message_payload(msg_type, content)
+        await self._send_message(
+            token=token,
+            url=url,
+            receive_id=chat_id,
+            receive_id_type="chat_id",
+            payload=payload,
+        )
 
-    async def _send_message_to_chat(
+    async def _send_message(
         self,
         *,
         token: str,
         url: str,
-        chat_id: str,
+        receive_id: str,
+        receive_id_type: str,
         payload: dict[str, str],
     ) -> None:
+        payload = {"receive_id": receive_id, **payload}
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(
                 url,
                 headers={"Authorization": f"Bearer {token}"},
-                params={"receive_id_type": "chat_id"},
+                params={"receive_id_type": receive_id_type},
                 json=payload,
             )
             _feishu_json_response(response, "Feishu send message")
 
-    async def deliver_text(self, *, message_id: str, chat_id: str, text: str) -> None:
+    async def deliver_text(self, *, message_id: str, chat_id: str, text: str, open_id: str = "") -> None:
         delivery_mode = self.settings.feishu_delivery_mode.strip().lower()
-        if delivery_mode == "reply" or not chat_id or chat_id in self._reply_only_chat_ids:
+        if delivery_mode == "reply" or (not chat_id and not open_id):
             await self.reply_to_message(message_id, text)
             return
         if delivery_mode == "send":
-            try:
-                await self.send_text_to_chat(chat_id, text)
-            except RuntimeError as error:
-                if not _is_invalid_receive_id_error(error):
-                    raise
-                self._reply_only_chat_ids.add(chat_id)
-                await self.reply_to_message(message_id, text)
+            if open_id and open_id not in self._reply_only_open_ids:
+                try:
+                    await self.send_text_to_open_id(open_id, text)
+                    return
+                except RuntimeError as error:
+                    if not _is_invalid_receive_id_error(error):
+                        raise
+                    self._reply_only_open_ids.add(open_id)
+            if chat_id and chat_id not in self._reply_only_chat_ids:
+                try:
+                    await self.send_text_to_chat(chat_id, text)
+                    return
+                except RuntimeError as error:
+                    if not _is_invalid_receive_id_error(error):
+                        raise
+                    self._reply_only_chat_ids.add(chat_id)
+            await self.reply_to_message(message_id, text)
             return
         raise RuntimeError(f"Unsupported Feishu delivery mode: {self.settings.feishu_delivery_mode}")
 
-    async def deliver_response(self, *, message_id: str, chat_id: str, text: str) -> None:
+    async def deliver_response(self, *, message_id: str, chat_id: str, text: str, open_id: str = "") -> None:
         paths = _extract_existing_local_paths(text)
         visible_text = _strip_local_path_markup(text, paths).strip()
         if visible_text:
-            await self.deliver_text(message_id=message_id, chat_id=chat_id, text=visible_text)
+            await self.deliver_text(message_id=message_id, chat_id=chat_id, open_id=open_id, text=visible_text)
         elif not paths:
-            await self.deliver_text(message_id=message_id, chat_id=chat_id, text=text)
+            await self.deliver_text(message_id=message_id, chat_id=chat_id, open_id=open_id, text=text)
 
         for path in paths:
             if not chat_id:
                 await self.deliver_text(
                     message_id=message_id,
                     chat_id=chat_id,
+                    open_id=open_id,
                     text=f"Created local file: {path}",
                 )
             elif _is_image_path(path):

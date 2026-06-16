@@ -14,10 +14,10 @@ class FakeCodex(CodexClient):
 
 class FakeFeishu(FeishuClient):
     def __init__(self) -> None:
-        self.deliveries: list[tuple[str, str, str]] = []
+        self.deliveries: list[tuple[str, str, str, str]] = []
 
-    async def deliver_response(self, *, message_id: str, chat_id: str, text: str) -> None:
-        self.deliveries.append((message_id, chat_id, text))
+    async def deliver_response(self, *, message_id: str, chat_id: str, text: str, open_id: str = "") -> None:
+        self.deliveries.append((message_id, chat_id, open_id, text))
 
 
 def test_health() -> None:
@@ -68,7 +68,7 @@ def test_feishu_event_replies_with_codex_response() -> None:
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
-    assert fake_feishu.deliveries == [("om_1", "oc_1", "Codex says: hello codex (oc_1)")]
+    assert fake_feishu.deliveries == [("om_1", "oc_1", "", "Codex says: hello codex (oc_1)")]
 
 
 def test_create_codex_client_selects_app_server() -> None:

@@ -362,7 +362,6 @@ def test_ask_stream_emits_codex_progress_events(tmp_path) -> None:
 
     assert answer == "done"
     assert events == [
-        CodexStreamEvent(kind="status", text="Codex started working.", item_id=None),
         CodexStreamEvent(kind="reasoning", text="Thinking", item_id="reason_1"),
         CodexStreamEvent(kind="tool", text="Running command: npm test", item_id=None),
     ]
